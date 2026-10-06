@@ -15,6 +15,10 @@
 //   <stage>` deletes the preview deployment.
 // - `pnpm run dev` runs Convex and Vite without Alchemy.
 //
+// A destroy of stage prod keeps the Worker and the Convex project, the
+// production app, unless DESTROY_APP marked them for deletion (see
+// keepProductionApp below).
+//
 // The outputs: `convexUrl` on every stage, which the workflow reads for the
 // app build, and `workerUrl`, the workers.dev URL of the Worker, on prod.
 //
@@ -50,6 +54,19 @@ const authVariables = (keys: Alchemy.KeyPair) => ({
   ),
 });
 
+/**
+ * Whether a destroy of stage prod keeps the production Worker and the Convex
+ * project: yes by default. Alchemy reads a removal policy from the state row
+ * that the last deploy wrote, not from this program, so a destroy acts on the
+ * policy of the last deploy. scripts/destroy-app.ts, the confirmed destroy of
+ * the app, deploys the Worker and the project with DESTROY_APP=true, which
+ * only rewrites their policy, and then destroys the stage, so it deletes
+ * them. Any later deploy without DESTROY_APP keeps them again.
+ */
+const keepProductionApp = Effect.gen(function* () {
+  return !(yield* Config.Boolean("DESTROY_APP").pipe(Config.withDefault(false)));
+}).pipe(Effect.orDie);
+
 /** The project, its production deployment, the auth keys, and the push. */
 const production = Effect.gen(function* () {
   // An unset repository variable reaches the workflow as an empty string.
@@ -62,10 +79,12 @@ const production = Effect.gen(function* () {
     );
   }
 
+  // The production deployment keeps the package's default, retain: deleting
+  // the project deletes it with every other deployment of the project.
   const project = yield* Convex.Project("Project", {
     team: Number(teamId),
     name: names.convexProject,
-  });
+  }).pipe(Alchemy.RemovalPolicy.retain(keepProductionApp));
   const deployment = yield* Convex.Deployment("Deployment", {
     projectId: project.projectId,
     type: "prod",
@@ -171,11 +190,10 @@ export default Alchemy.Stack(
     }
 
     // Only the name: every other Worker setting stays with cloudflare.config.ts,
-    // which `cf deploy` uploads. Retained on destroy, because it is the
-    // production Worker of the app. A Worker with this name that the stack did
-    // not create stops the deploy until `alchemy deploy --adopt`.
+    // which `cf deploy` uploads. A Worker with this name that the stack did not
+    // create stops the deploy until `alchemy deploy --adopt`.
     const shell = yield* WorkersBuilds.Worker("Worker", { name: worker.name }).pipe(
-      Alchemy.RemovalPolicy.retain(),
+      Alchemy.RemovalPolicy.retain(keepProductionApp),
     );
     const backend = yield* production;
     return { convexUrl: backend.url, workerUrl: shell.url };

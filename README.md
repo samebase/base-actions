@@ -73,6 +73,7 @@ The workflow runs for every branch, the way Cloudflare Workers Builds builds eve
 | Push to the default branch | `alchemy deploy --stage prod`, the app build, `cf deploy --prebuilt`                                                                           |
 | Push to any other branch   | `alchemy deploy --stage <stage>`, the Preview build, `cf previews deploy --prebuilt <Preview name>`, the comment on an open pull request       |
 | Branch deleted             | `alchemy destroy --stage <stage>`, which deletes the Convex preview deployment, then `scripts/delete-worker-preview.ts` for the Worker Preview |
+| Run workflow, confirmed    | The destroy of the app: see [Destroy the app](#destroy-the-app)                                                                                |
 
 The stack outputs `convexUrl` on every stage and `workerUrl`, the `workers.dev` URL of the Worker, on
 `prod`. After `alchemy deploy`, the workflow reads them with `alchemy state read` and builds the app
@@ -89,12 +90,12 @@ Before the deploy, the job checks that its commit is still the head of the branc
 older push ends without a deploy. Before the destroy, the job checks that the branch is still
 deleted. A rerun of a delete after the branch was pushed again ends without a destroy.
 
-Both jobs run only when the repository variable `CONVEX_TEAM_ID` is set. A copy of the repository
+The jobs run only when the repository variable `CONVEX_TEAM_ID` is set. A copy of the repository
 without the deploy setup skips them.
 
 Each job installs the dependencies without lifecycle scripts and runs `pnpm audit signatures` first.
 The deploy job then runs the two vulnerability audits of `.github/workflows/ci.yml` and
-`pnpm run check`. The destroy job does not, so a new advisory cannot block a cleanup. Each credential
+`pnpm run check`. The destroy jobs do not, so a new advisory cannot block a cleanup. Each credential
 goes only to the steps that need it.
 
 The names, for the repository `my-org/my-app` and the branch `feature/Foo_bar`:
@@ -136,11 +137,31 @@ already has a project with the same name that is not in this stack's state, the 
 
 The stack makes the Convex Auth keys: `JWT_PRIVATE_KEY` and `JWKS` on the production deployment,
 and the same two variables as project defaults for preview and dev deployments. The Worker and the
-Convex project are kept when the stack is destroyed.
+Convex project are kept when stage `prod` is destroyed, unless the destroy of the app runs.
 
 Alchemy keeps its state in a state store in the Cloudflare account, which every stack of the account
 shares. With `--yes`, the first deploy in an account creates the store: a Worker named
 `alchemy-state-store` with its keys in the account Secrets Store.
+
+### Destroy the app
+
+To delete the deployed app, open **Actions** in the GitHub repository, select the `alchemy`
+workflow, and choose **Run workflow** on the default branch. Type the repository as
+`<owner>/<repository>` in the `confirm` field and run it. The run deletes the Worker with its
+Previews, the Convex project with every deployment and its data, and the stack's state in the
+Alchemy state store, so a later repository with the same name starts clean. A different value, or a
+run on another branch, runs nothing. The run waits for a running deploy of the default branch, and
+the credentials never leave the repository's secrets.
+
+A destroy reads the removal policy of each resource from the state of the last deploy. So
+`scripts/destroy-app.ts` first deploys the Worker shell and the Convex project with
+`DESTROY_APP=true`, which only marks both for deletion, then runs `alchemy destroy --stage prod`,
+then deletes the stack's state. A second run finds no stack and changes nothing. If a destroy
+without `DESTROY_APP` already removed stage `prod` from the state and left the Worker and the
+project in the accounts, the run stops with `OwnedBySomeoneElse` and keeps the rest of the state:
+delete the two in the Cloudflare and Convex dashboards, then run it again. The repository
+itself stays: delete it on GitHub when it is no longer needed. A later push to the default branch
+deploys the app again.
 
 ### Secrets and variables
 

@@ -12,6 +12,10 @@
 #   Preview URL and the Convex URL as a comment on it.
 # - Branch deleted: `alchemy destroy --stage <stage>` and the delete of the
 #   Worker Preview, unless the branch exists again when the run gets there.
+# - Run workflow on the default branch, with `<owner>/<repository>` typed in
+#   the confirm field: scripts/destroy-app.ts destroys the app. It deletes the
+#   Worker with its Previews, the Convex project with all its deployments,
+#   and the stack's state. Any other confirm value or branch runs nothing.
 #
 # A push to a fork runs the workflows of the fork, never this one, so a pull
 # request from a fork gets no preview.
@@ -31,6 +35,12 @@ on:
   push:
     branches: ["**"]
   delete:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type owner/repository to destroy the app: the Worker, the Convex project with all its deployments, and the stack state"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -38,7 +48,9 @@ permissions:
 
 # One run at a time per branch. Pending runs wait instead of replacing each
 # other, so a destroy waits for a running or queued deploy of the same branch.
-# The group is `alchemy-<branch>`: github.ref_name on a push, and
+# The group is `alchemy-<branch>`: github.ref_name on a push and on a run of
+# the workflow (the branch it runs on, which the destroy of the app requires
+# to be the default branch, so it waits for a deploy of prod), and
 # github.event.ref on a delete, where github.ref_name is the default branch.
 # An expression cannot run scripts/alchemy-stage.ts, but the stage is a
 # function of the branch, so all runs of one stage share one group.
@@ -209,3 +221,46 @@ jobs:
           case "$STAGE" in ""|prod) echo "Refusing to destroy the stage '$STAGE'"; exit 1 ;; esac
           pnpm exec alchemy destroy --stage "$STAGE" --yes --no-input
           node ./scripts/delete-worker-preview.ts
+
+  destroy-app:
+    # Runs only on the default branch, and only when the confirm input is this
+    # repository. GitHub compares the two strings without regard to case. A
+    # wrong value or another branch skips the job, so nothing runs.
+    if: vars.CONVEX_TEAM_ID != '' && github.event_name == 'workflow_dispatch' && inputs.confirm == github.repository && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 11.1.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.x
+          cache: pnpm
+
+      # No install scripts and no credentials, so no dependency code runs with secrets before the audit passes.
+      - name: Install dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # Like the destroy job: a new advisory cannot block a destroy.
+      - name: Audit package signatures
+        run: pnpm audit signatures
+
+      # A dry run that upgrades the state store, a deploy of the Worker shell
+      # and the Convex project with DESTROY_APP=true, `alchemy destroy --stage
+      # prod`, then the delete of the stack's state. scripts/destroy-app.ts
+      # says why and in what order.
+      - name: Destroy the app
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CONVEX_ACCESS_TOKEN: ${{ secrets.CONVEX_ACCESS_TOKEN }}
+        run: node ./scripts/destroy-app.ts

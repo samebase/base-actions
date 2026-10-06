@@ -3,6 +3,11 @@
 // runs in a later step without credentials and bakes the URL into the client
 // bundle; the comment on a pull request shows it. Reading the state store
 // needs the Cloudflare credentials of the deploy step.
+//
+// `--backend cloudflare` opens the account's default state store, the one
+// that `state: Cloudflare.state()` in alchemy.run.ts configures, without
+// loading alchemy.run.ts. The CLI evaluates a stack file under its placeholder
+// stage, and the stack refuses a preview stage without PREVIEW_BRANCH.
 /// <reference types="node" />
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
@@ -35,7 +40,15 @@ if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) {
   }
   const stdout = execFileSync(
     "pnpm",
-    ["exec", "alchemy", "state", "read", `${deployNames().stack}/${stage}/output`],
+    [
+      "exec",
+      "alchemy",
+      "state",
+      "read",
+      "--backend",
+      "cloudflare",
+      `${deployNames().stack}/${stage}/output`,
+    ],
     { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
   );
   const output = parseStackOutput(stdout);
