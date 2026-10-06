@@ -15,7 +15,8 @@
     "dev:frontend": "vp dev",
     "dev:worktree": "node ./scripts/run-worktree-dev.ts",
     "check": "vp check && vp run typecheck && vp test && vp run verify:cloudflare-redirects && vp run verify:dev-launcher-version",
-    "build": "vp run check && vp build",
+    "build": "vp run check && vp run build:app",
+    "build:app": "vp build && node ./scripts/build-worker.ts",
     "format": "vp fmt",
     "format:check": "vp fmt --check",
     "generate:cloudflare-redirects": "node ./scripts/generate-cloudflare-redirects.ts",
@@ -49,6 +50,7 @@
   },
   "devDependencies": {
     "@effect/platform-node": "^4.0.0",
+    "@samebase/alchemy-cloudflare-workers-builds": "0.5.0",
     "@samebase/alchemy-convex": "0.3.0",
     "@tanstack/router-plugin": "^1.168.23",
     "@types/node": "^24.0.0",
@@ -56,12 +58,14 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
     "alchemy": "2.0.0-beta.80",
+    "cf": "1.0.0-beta.12",
     "effect": "^4.0.0",
     "shadcn": "^4.16.1",
     "typescript": "~6.0.2",
     "vite": "catalog:",
     "vite-plus": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "wrangler": "4.136.2"
   },
   "packageManager": "pnpm@11.1.1"
 }

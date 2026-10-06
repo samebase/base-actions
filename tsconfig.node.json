@@ -24,5 +24,11 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["scripts/**/*.ts", "vite.config.ts", "alchemy.run.ts"]
+  "include": [
+    "scripts/**/*.ts",
+    "vite.config.ts",
+    "alchemy.run.ts",
+    "cloudflare.config.ts",
+    "wrangler.config.ts"
+  ]
 }

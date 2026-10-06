@@ -31,3 +31,6 @@ convex/.tmp
 
 # Alchemy local state
 .alchemy
+
+# Build Output of the Worker (scripts/build-worker.ts)
+.cloudflare
