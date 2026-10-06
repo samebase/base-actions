@@ -29,8 +29,5 @@ convex/.tmp
 *.sln
 *.sw?
 
-# Alchemy local state
+# Files of the Alchemy CLI
 .alchemy
-
-# Build Output of the Worker (scripts/build-worker.ts)
-.cloudflare

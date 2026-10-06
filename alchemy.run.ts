@@ -1,30 +1,21 @@
-// The setup stack of this app. It declares the Worker shell, the Convex side,
-// and the wiring between them, and pushes the Convex functions. It never
-// uploads Worker code: cloudflare.config.ts defines the Worker, and
-// .github/workflows/alchemy.yml builds it and uploads it with `cf` after this
-// stack deploys. The Worker name comes from cloudflare.config.ts.
+// The setup stack of this app. Workers Builds deploys the app on every push;
+// this stack declares the setup around it, following the Samebase research
+// note "Alchemy setup stacks next to Workers Builds"
+// (research/2026-10-05-alchemy-setup-stack-and-wrangler-split.md in the
+// Samebase repository): the stack owns wiring, not settings, and each field
+// has one owner.
 //
-// - Stage `prod` (a push to the default branch): the Worker shell, the Convex
-//   project and its production deployment, the Convex Auth keys, and the
-//   functions push.
-// - Any other stage is the preview of one branch (a push to any other
-//   branch). PREVIEW_BRANCH holds the branch, and scripts/alchemy-stage.ts
-//   computes the stage from it. A Convex preview deployment named after the
-//   branch, the name `npx convex deploy --preview-name` gives it, and the
-//   functions push. When the branch is deleted, `alchemy destroy --stage
-//   <stage>` deletes the preview deployment.
-// - `pnpm run dev` runs Convex and Vite without Alchemy.
+// - This stack: the Worker shell, the Workers Builds link with its build
+//   variables, the Convex project, and the two Convex deploy keys of the
+//   builds. It never uploads Worker code.
+// - wrangler.jsonc: everything of the Worker version. It has no `name`:
+//   Workers Builds deploys to the Worker it is connected to, whose name this
+//   stack gives from the repository (scripts/deploy-names.ts).
 //
-// A destroy of stage prod keeps the Worker and the Convex project, the
-// production app, unless DESTROY_APP marked them for deletion (see
-// keepProductionApp below).
-//
-// The outputs: `convexUrl` on every stage, which the workflow reads for the
-// app build, and `workerUrl`, the workers.dev URL of the Worker, on prod.
-//
-// A deploy from a laptop needs GITHUB_REPOSITORY (`<owner>/<repository>`),
-// CONVEX_TEAM_ID, CLOUDFLARE_API_TOKEN, and CLOUDFLARE_ACCOUNT_ID in the
-// environment or in .env, and CONVEX_ACCESS_TOKEN or the Convex CLI login:
+// .github/workflows/alchemy.yml runs it on its one stage, prod. A deploy from
+// a laptop needs GITHUB_REPOSITORY, CONVEX_TEAM_ID, CLOUDFLARE_API_TOKEN, and
+// CLOUDFLARE_ACCOUNT_ID in the environment or in .env, CONVEX_ACCESS_TOKEN or
+// the Convex CLI login, and GITHUB_TOKEN for a private repository:
 //   pnpm exec alchemy deploy --stage prod
 import * as WorkersBuilds from "@samebase/alchemy-cloudflare-workers-builds";
 import * as Convex from "@samebase/alchemy-convex";
@@ -35,120 +26,91 @@ import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
-import { createPublicKey } from "node:crypto";
+import * as Schema from "effect/Schema";
 
-import { worker } from "./cloudflare.config.ts";
 import { deployNames } from "./scripts/deploy-names.ts";
 
 const names = deployNames();
 
-// Convex Auth reads JWT_PRIVATE_KEY (PKCS#8 PEM, line breaks as spaces) and
-// JWKS (the public key as a JSON Web Key Set). Same format as
-// scripts/ensure-convex-auth.ts.
-const authVariables = (keys: Alchemy.KeyPair) => ({
-  JWT_PRIVATE_KEY: Output.map(keys.privateKey, (pem) =>
-    Redacted.make(Redacted.value(pem).trimEnd().replace(/\n/g, " ")),
-  ),
-  JWKS: Output.map(keys.publicKey, (pem) =>
-    JSON.stringify({ keys: [{ use: "sig", ...createPublicKey(pem).export({ format: "jwk" }) }] }),
-  ),
-});
-
 /**
- * Whether a destroy of stage prod keeps the production Worker and the Convex
- * project: yes by default. Alchemy reads a removal policy from the state row
- * that the last deploy wrote, not from this program, so a destroy acts on the
- * policy of the last deploy. scripts/destroy-app.ts, the confirmed destroy of
- * the app, deploys the Worker and the project with DESTROY_APP=true, which
- * only rewrites their policy, and then destroys the stage, so it deletes
- * them. Any later deploy without DESTROY_APP keeps them again.
+ * Whether a destroy keeps the Worker and the Convex project: yes, unless
+ * DESTROY_APP is set. Alchemy reads a removal policy from the state that the
+ * last deploy wrote, so scripts/destroy-app.ts deploys these two with
+ * DESTROY_APP=true before it destroys the stage.
  */
 const keepProductionApp = Effect.gen(function* () {
   return !(yield* Config.Boolean("DESTROY_APP").pipe(Config.withDefault(false)));
 }).pipe(Effect.orDie);
 
-/** The project, its production deployment, the auth keys, and the push. */
-const production = Effect.gen(function* () {
-  // An unset repository variable reaches the workflow as an empty string.
-  const teamId = yield* Config.String("CONVEX_TEAM_ID").pipe(Config.withDefault(""));
-  if (!/^\d+$/.test(teamId)) {
-    return yield* Effect.die(
-      new Error(
-        `CONVEX_TEAM_ID is "${teamId}", not the numeric id of a Convex team. Set the repository variable CONVEX_TEAM_ID. For a deploy from a laptop, set it in the environment or in .env.`,
-      ),
-    );
-  }
-
-  // The production deployment keeps the package's default, retain: deleting
-  // the project deletes it with every other deployment of the project.
-  const project = yield* Convex.Project("Project", {
-    team: Number(teamId),
-    name: names.convexProject,
-  }).pipe(Alchemy.RemovalPolicy.retain(keepProductionApp));
-  const deployment = yield* Convex.Deployment("Deployment", {
-    projectId: project.projectId,
-    type: "prod",
-  });
-  const key = yield* Convex.DeployKey("DeployKey", {
-    deployment: deployment.name,
-    name: "alchemy",
-    allowedActions: [
-      "deployment:deploy",
-      "deployment:env:view",
-      "deployment:env:write",
-      "deployment:data:view",
-    ],
-  });
-
-  // Preview and dev deployments get their auth keys as project defaults:
-  // a preview deploy key cannot set variables, and Convex copies the
-  // defaults into each new deployment of that type.
-  const nonProduction = authVariables(
-    yield* Alchemy.KeyPair("NonProductionJwtKey", { algorithm: "rsa" }),
-  );
-  for (const deploymentType of ["preview", "dev"] as const) {
-    for (const [name, value] of Object.entries(nonProduction)) {
-      yield* Convex.DefaultEnvironmentVariable(`${deploymentType}-${name}`, {
-        projectId: project.projectId,
-        deploymentType,
-        name,
-        value,
-      });
-    }
-  }
-
-  return yield* Convex.Code("Functions", {
-    deployment,
-    deployKey: key.deployKey,
-    cwd: ".",
-    env: authVariables(yield* Alchemy.KeyPair("JwtKey", { algorithm: "rsa" })),
-  });
-});
-
 /**
- * A preview deployment of the project that stage `prod` owns, and the push.
- * The deployment is named after the branch, like the preview that `npx convex
- * deploy --preview-name <branch>` makes, so a reader finds it under one name
- * on both deploy paths.
+ * Starts the first production build. Samebase pushes the starter to main
+ * before this stack creates the Builds link, and creating a link starts no
+ * build, so without this the Worker has no version until the next push to
+ * main. An Action runs again only when its input changes: a new Worker or
+ * another production branch, or `alchemy deploy --force`.
  */
-const preview = (branch: string) =>
-  Effect.gen(function* () {
-    const project = yield* Convex.Project.ref("Project", { stage: "prod" });
-    const deployment = yield* Convex.Deployment("Deployment", {
-      projectId: project.projectId,
-      type: "preview",
-      name: branch,
-    }).pipe(Alchemy.RemovalPolicy.destroy());
-    const key = yield* Convex.PreviewDeployKey("PreviewDeployKey", {
-      projectId: project.projectId,
-      name: "alchemy",
+const FirstBuild = Alchemy.Action(
+  "FirstBuild",
+  Effect.fn(function* (link: { accountId: string; scriptTag: string; branch: string }) {
+    const token = yield* Config.Redacted("CLOUDFLARE_API_TOKEN");
+    const request = (path: string, init?: { method: "POST"; body: string }) =>
+      Effect.tryPromise({
+        try: async () => {
+          const response = await fetch(
+            `https://api.cloudflare.com/client/v4/accounts/${link.accountId}/builds${path}`,
+            {
+              ...init,
+              headers: {
+                authorization: `Bearer ${Redacted.value(token)}`,
+                "content-type": "application/json",
+              },
+            },
+          );
+          // Cloudflare answers some errors with a body that is not JSON.
+          const text = await response.text();
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${text}`);
+          }
+          const body: unknown = JSON.parse(text);
+          return body;
+        },
+        catch: (cause) => new Error(`The Workers Builds request ${path} failed. ${String(cause)}`),
+      });
+
+    const { result: triggers } = Schema.decodeUnknownSync(
+      Schema.Struct({
+        result: Schema.Array(
+          Schema.Struct({
+            trigger_uuid: Schema.String,
+            branch_includes: Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.String))),
+            deleted_on: Schema.optionalKey(Schema.NullOr(Schema.String)),
+          }),
+        ),
+      }),
+    )(yield* request(`/workers/${link.scriptTag}/triggers`));
+    // The production trigger builds exactly the production branch.
+    const production = triggers.filter(
+      (trigger) =>
+        !trigger.deleted_on &&
+        trigger.branch_includes?.length === 1 &&
+        trigger.branch_includes[0] === link.branch,
+    );
+    if (production.length !== 1) {
+      return yield* Effect.die(
+        new Error(
+          `Workers Builds has ${production.length} production triggers for ${link.branch}, not one. Start the first build in the Cloudflare dashboard.`,
+        ),
+      );
+    }
+
+    // With only the branch, Workers Builds builds the head of the branch.
+    yield* request(`/triggers/${production[0].trigger_uuid}/builds`, {
+      method: "POST",
+      body: JSON.stringify({ branch: link.branch }),
     });
-    return yield* Convex.Code("Functions", {
-      deployment,
-      deployKey: key.previewDeployKey,
-      cwd: ".",
-    });
-  });
+    return { triggerUuid: production[0].trigger_uuid };
+  }),
+);
 
 export default Alchemy.Stack(
   names.stack,
@@ -163,39 +125,72 @@ export default Alchemy.Stack(
     state: Cloudflare.state(),
   },
   Effect.gen(function* () {
+    // Another stage would own the same Worker and Convex project.
     const { stage } = yield* Alchemy.Stack;
-    // scripts/alchemy-stage.ts sets the stage and PREVIEW_BRANCH in
-    // .github/workflows/alchemy.yml: prod and empty on the default branch, the
-    // stage of the branch and the branch itself on any other branch.
-    const previewBranch = yield* Config.String("PREVIEW_BRANCH").pipe(Config.withDefault(""));
-    const isPreview = stage !== "prod";
-    if (!isPreview && previewBranch !== "") {
+    if (stage !== "prod") {
       return yield* Effect.die(
-        new Error(
-          `PREVIEW_BRANCH is "${previewBranch}" on stage prod. A preview never deploys as prod.`,
-        ),
-      );
-    }
-    if (isPreview && previewBranch === "") {
-      return yield* Effect.die(
-        new Error(
-          `Stage "${stage}" is a preview stage, and PREVIEW_BRANCH is empty. Set it to the branch of the preview.`,
-        ),
+        new Error(`Stage "${stage}" is not prod. Deploy with --stage prod.`),
       );
     }
 
-    if (isPreview) {
-      const backend = yield* preview(previewBranch);
-      return { convexUrl: backend.url };
-    }
-
-    // Only the name: every other Worker setting stays with cloudflare.config.ts,
-    // which `cf deploy` uploads. A Worker with this name that the stack did not
-    // create stops the deploy until `alchemy deploy --adopt`.
-    const shell = yield* WorkersBuilds.Worker("Worker", { name: worker.name }).pipe(
+    // A Worker or a project with this name that the stack did not create
+    // stops the deploy until `alchemy deploy --adopt`.
+    const shell = yield* WorkersBuilds.Worker("Worker", { name: names.worker }).pipe(
       Alchemy.RemovalPolicy.retain(keepProductionApp),
     );
-    const backend = yield* production;
-    return { convexUrl: backend.url, workerUrl: shell.url };
+    const project = yield* Convex.Project("Project", {
+      team: yield* Config.Int("CONVEX_TEAM_ID"),
+      name: names.convexProject,
+    }).pipe(Alchemy.RemovalPolicy.retain(keepProductionApp));
+
+    // The production key gets only what scripts/build-cloudflare.ts and
+    // scripts/ensure-convex-auth.ts need. Without allowedActions, Convex
+    // grants every deployment action.
+    const deployKey = yield* Convex.DeployKey("DeployKey", {
+      deployment: Output.map(project.prodDeploymentName, (name) => {
+        if (!name) {
+          throw new Error(
+            `The Convex project ${names.convexProject} has no production deployment.`,
+          );
+        }
+        return name;
+      }),
+      name: "workers-builds",
+      allowedActions: [
+        "deployment:deploy",
+        "deployment:env:view",
+        "deployment:env:write",
+        "deployment:data:view",
+      ],
+    });
+    const previewKey = yield* Convex.PreviewDeployKey("PreviewDeployKey", {
+      projectId: project.projectId,
+      name: "workers-builds",
+    });
+
+    // The provider reads the default branch, main, as the production branch.
+    // Worker Previews and build caching keep their defaults: on.
+    const builds = yield* WorkersBuilds.Repository("Builds", {
+      worker: shell.workerId,
+      repository: names.repository,
+      buildCommand: "pnpm run build",
+      deployCommand: "pnpm run deploy",
+      previewDeployCommand: "pnpm run deploy:preview",
+      // scripts/build-cloudflare.ts reads CONVEX_DEPLOY_KEY. Samebase reads
+      // SAMEBASE_CONVEX_PROJECT to link the Worker to its Convex project.
+      variables: {
+        CONVEX_DEPLOY_KEY: deployKey.deployKey,
+        SAMEBASE_CONVEX_PROJECT: Output.interpolate`version=1&teamId=${project.teamId}&projectId=${project.projectId}`,
+      },
+      previewVariables: { CONVEX_DEPLOY_KEY: previewKey.previewDeployKey },
+    });
+
+    yield* FirstBuild({
+      accountId: builds.accountId,
+      scriptTag: builds.scriptTag,
+      branch: builds.repository.branch,
+    });
+
+    return { workerUrl: shell.url, convexUrl: project.prodDeploymentUrl };
   }),
 );

@@ -1,22 +1,18 @@
 // Destroys the whole app: the destroy-app job of .github/workflows/alchemy.yml
-// runs it after the typed confirmation. It needs the three credentials of the
-// deploy.
+// runs it after the typed confirmation, with the credentials of the deploy.
 //
 // 1. A dry run of the deploy below opens the state store with --yes, which
 //    upgrades an out-of-date store; the `alchemy state` commands cannot. A
-//    stack without state ends the run here: there is nothing to destroy.
-// 2. A destroy reads the removal policy of each resource from the state that
-//    the last deploy wrote, and that policy keeps the production Worker and
-//    the Convex project. So it deploys only those two with DESTROY_APP=true,
-//    which rewrites their policy (alchemy.run.ts) without a push or an
-//    upload. When stage prod has no state, that deploy creates the two again,
-//    or stops with OwnedBySomeoneElse when a destroy without DESTROY_APP left
-//    them in the accounts; the state of the previews then stays.
-// 3. `alchemy destroy --stage prod` deletes the Worker with its Previews and
-//    the Convex project with all its deployments.
-// 4. It deletes the rest of the stack's state: the rows of the preview
-//    stages and their outputs, whose cloud resources went with the Worker and
-//    the project, so a later repository with the same name starts clean.
+//    stack without state ends the run here.
+// 2. The last deploy wrote a removal policy that keeps the Worker and the
+//    Convex project, and a destroy reads that policy from state. So it
+//    deploys only those two with DESTROY_APP=true (alchemy.run.ts), which
+//    rewrites their policy and nothing else.
+// 3. `alchemy destroy --stage prod` deletes the Workers Builds link, the
+//    deploy keys, the Worker with its Previews, and the Convex project with
+//    all its deployments.
+// 4. It deletes what the destroy left of the stack's state, so a later
+//    repository with the same name starts clean.
 //
 // `--backend cloudflare` opens the account's default state store, the one
 // that `state: Cloudflare.state()` in alchemy.run.ts configures, without

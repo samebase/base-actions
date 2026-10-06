@@ -1,61 +1,52 @@
-# Deploys the app. Previews are per branch, the way Cloudflare Workers Builds
-# builds every branch. There is no Workers Builds trigger.
+# Runs the setup stack in alchemy.run.ts. Workers Builds deploys the app on
+# every push; this workflow applies only the setup around it.
 #
-# - Push to the default branch: `alchemy deploy --stage prod` (the Worker
-#   shell, the Convex project and production deployment, the functions push),
-#   the app build, then `cf deploy --prebuilt`.
-# - Push to any other branch: `alchemy deploy --stage <stage>` (a Convex
-#   preview deployment named after the branch and the functions push), the
-#   preview build, then `cf previews deploy --prebuilt <preview name>`.
-#   scripts/alchemy-stage.ts computes the stage and the Preview name from the
-#   branch. When a pull request from the branch is open, the job posts the
-#   Preview URL and the Convex URL as a comment on it.
-# - Branch deleted: `alchemy destroy --stage <stage>` and the delete of the
-#   Worker Preview, unless the branch exists again when the run gets there.
-# - Run workflow on the default branch, with `<owner>/<repository>` typed in
-#   the confirm field: scripts/destroy-app.ts destroys the app. It deletes the
-#   Worker with its Previews, the Convex project with all its deployments,
-#   and the stack's state. Any other confirm value or branch runs nothing.
-#
-# A push to a fork runs the workflows of the fork, never this one, so a pull
-# request from a fork gets no preview.
+# - Pull request that changes the stack: a plan and a drift report, read-only.
+# - Push to main that changes the stack: a deploy that also repairs drift.
+# - Run workflow on main: the same deploy, with `adopt` for resources that
+#   exist but are not in the state yet. With `<owner>/<repository>` in the
+#   confirm field, scripts/destroy-app.ts destroys the app instead.
 #
 # Each job installs without lifecycle scripts and audits the packages before
-# any credential is in use. Each credential goes only to the steps that need
-# it; the app build gets none.
-#
-# State is Alchemy's Cloudflare state store. With --yes, the first deploy in a
-# Cloudflare account creates the store, and a deploy upgrades an old store.
-# Secrets: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, and CONVEX_ACCESS_TOKEN
-# (a Convex team access token). Variable: CONVEX_TEAM_ID (the numeric id of
-# that Convex team).
+# any credential is in use. The jobs skip a repository without the
+# CONVEX_TEAM_ID variable, such as the published copy of this template.
 name: alchemy
 
 on:
+  pull_request:
+    paths:
+      - alchemy.run.ts
+      - scripts/deploy-names.ts
+      - package.json
+      - pnpm-lock.yaml
+      - .github/workflows/alchemy.yml
   push:
-    branches: ["**"]
-  delete:
+    branches: [main]
+    paths:
+      - alchemy.run.ts
+      - scripts/deploy-names.ts
+      - package.json
+      - pnpm-lock.yaml
+      - .github/workflows/alchemy.yml
   workflow_dispatch:
     inputs:
+      adopt:
+        description: "Adopt resources that exist but are not in the state yet"
+        type: boolean
+        default: false
       confirm:
-        description: "Type owner/repository to destroy the app: the Worker, the Convex project with all its deployments, and the stack state"
-        required: true
+        description: "Type owner/repository to destroy the app instead: the Worker, the Convex project with all its deployments, and the stack state"
+        required: false
         type: string
 
 permissions:
   contents: read
-  pull-requests: write
 
-# One run at a time per branch. Pending runs wait instead of replacing each
-# other, so a destroy waits for a running or queued deploy of the same branch.
-# The group is `alchemy-<branch>`: github.ref_name on a push and on a run of
-# the workflow (the branch it runs on, which the destroy of the app requires
-# to be the default branch, so it waits for a deploy of prod), and
-# github.event.ref on a delete, where github.ref_name is the default branch.
-# An expression cannot run scripts/alchemy-stage.ts, but the stage is a
-# function of the branch, so all runs of one stage share one group.
+# One run at a time. Pending runs wait instead of replacing each other, so a
+# pull request plan never drops a queued deploy, and a destroy waits for a
+# running or queued deploy.
 concurrency:
-  group: alchemy-${{ github.event_name == 'delete' && github.event.ref || github.ref_name }}
+  group: alchemy
   queue: max
   cancel-in-progress: false
 
@@ -65,13 +56,13 @@ env:
   CONVEX_TEAM_ID: ${{ vars.CONVEX_TEAM_ID }}
 
 jobs:
-  deploy:
+  plan:
     # A repository without the deploy setup, such as the published copy of
-    # this template, has no CONVEX_TEAM_ID variable and no secrets, so its
-    # pushes skip the deploy. An unset variable is an empty string.
-    if: vars.CONVEX_TEAM_ID != '' && github.event_name == 'push'
+    # this template, has no CONVEX_TEAM_ID variable and no secrets, so it
+    # skips the jobs. An unset variable is an empty string.
+    if: vars.CONVEX_TEAM_ID != '' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -88,14 +79,6 @@ jobs:
         with:
           node-version: 24.x
           cache: pnpm
-
-      # Sets STAGE, PREVIEW_BRANCH, and PREVIEW_NAME. A branch without a
-      # preview stage fails here.
-      - name: Compute the Alchemy stage
-        env:
-          BRANCH: ${{ github.ref_name }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: node ./scripts/alchemy-stage.ts
 
       # No install scripts and no credentials, so no dependency code runs with secrets before the audits pass.
       - name: Install dependencies without lifecycle scripts
@@ -110,67 +93,39 @@ jobs:
       - name: Reject critical development-tool vulnerabilities
         run: pnpm audit --dev --audit-level=critical
 
-      - name: Check
-        run: pnpm run check
-
-      # A rerun of an older push, or a run that waited behind a newer push to
-      # the same branch, ends here without a deploy.
-      - name: Check that the commit is still the branch head
-        id: branch
-        env:
-          BRANCH: ${{ github.ref_name }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node ./scripts/check-branch-head.ts deploy
-
-      # Then reads the stage outputs from the state store and sets
-      # VITE_CONVEX_URL for the build.
-      - name: Deploy the stack
-        if: steps.branch.outputs.proceed == 'true'
+      # Read-only. The stack reads the GitHub ids and the default branch of
+      # this repository from the GitHub API.
+      - name: Plan the stack
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CONVEX_ACCESS_TOKEN: ${{ secrets.CONVEX_ACCESS_TOKEN }}
-        run: |
-          pnpm exec alchemy deploy --stage "$STAGE" --yes --no-input
-          node ./scripts/read-stack-output.ts
+          GITHUB_TOKEN: ${{ github.token }}
+        run: pnpm exec alchemy plan --stage prod --no-input --detailed
 
-      # No credentials: the Vite build and the Wrangler bundler write the
-      # Build Output to .cloudflare/output. A preview branch gets a Preview
-      # build (scripts/build-worker.ts reads PREVIEW_BRANCH).
-      - name: Build the app
-        if: steps.branch.outputs.proceed == 'true'
-        run: pnpm run build:app
-
-      - name: Deploy the Worker
-        if: steps.branch.outputs.proceed == 'true' && env.STAGE == 'prod'
+      # Read-only: reports resources that changed outside the stack.
+      - name: Report drift
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: pnpm exec cf deploy --prebuilt
+          CONVEX_ACCESS_TOKEN: ${{ secrets.CONVEX_ACCESS_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: pnpm exec alchemy drift --stage prod --no-input
 
-      # Sets PREVIEW_URL.
-      - name: Deploy the Worker Preview
-        if: steps.branch.outputs.proceed == 'true' && env.STAGE != 'prod'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: node ./scripts/deploy-worker-preview.ts
-
-      - name: Comment on the open pull request
-        if: steps.branch.outputs.proceed == 'true' && env.STAGE != 'prod'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node ./scripts/comment-preview.ts
-
-  destroy:
-    # Skipped without CONVEX_TEAM_ID, like the deploy. A deleted tag has no stage.
-    if: vars.CONVEX_TEAM_ID != '' && github.event_name == 'delete' && github.event.ref_type == 'branch'
+  deploy:
+    # A push to main, or a run of the workflow on the default branch with no
+    # confirm value. Skipped without CONVEX_TEAM_ID, like the plan.
+    if: vars.CONVEX_TEAM_ID != '' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.confirm == '' && github.ref_name == github.event.repository.default_branch))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # The head of the branch, not the commit of the run: a rerun of an older
+      # run, or a run that waited behind a newer push, applies the newest stack
+      # instead of an older one.
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ github.ref }}
           persist-credentials: false
 
       - name: Setup pnpm
@@ -184,43 +139,29 @@ jobs:
           node-version: 24.x
           cache: pnpm
 
-      - name: Compute the Alchemy stage
-        env:
-          BRANCH: ${{ github.event.ref }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: node ./scripts/alchemy-stage.ts
-
-      # No install scripts and no credentials, so no dependency code runs with secrets before the audit passes.
+      # No install scripts and no credentials, so no dependency code runs with secrets before the audits pass.
       - name: Install dependencies without lifecycle scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      # The vulnerability audits of the deploy job protect the deployed app,
-      # not the cleanup, so a new advisory cannot block a destroy.
       - name: Audit package signatures
         run: pnpm audit signatures
 
-      # A rerun of this delete after the branch was pushed again ends here and
-      # keeps the new preview.
-      - name: Check that the branch is still deleted
-        id: branch
-        env:
-          BRANCH: ${{ github.event.ref }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node ./scripts/check-branch-head.ts destroy
+      - name: Audit production dependencies
+        run: pnpm audit --prod
 
-      - name: Destroy the preview
-        if: steps.branch.outputs.proceed == 'true'
+      - name: Reject critical development-tool vulnerabilities
+        run: pnpm audit --dev --audit-level=critical
+
+      # The deploy that creates the Workers Builds link also starts the first
+      # production build (FirstBuild in alchemy.run.ts): Samebase pushes the
+      # starter before this workflow creates the link, so no push builds it.
+      - name: Deploy the stack
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CONVEX_ACCESS_TOKEN: ${{ secrets.CONVEX_ACCESS_TOKEN }}
-        # scripts/alchemy-stage.ts gives a deleted branch a stage that ends in a
-        # hash, never prod or an empty stage. This guard keeps a destroy away
-        # from prod if that ever changes.
-        run: |
-          case "$STAGE" in ""|prod) echo "Refusing to destroy the stage '$STAGE'"; exit 1 ;; esac
-          pnpm exec alchemy destroy --stage "$STAGE" --yes --no-input
-          node ./scripts/delete-worker-preview.ts
+          GITHUB_TOKEN: ${{ github.token }}
+        run: pnpm exec alchemy deploy --stage prod --yes --no-input --detect-drift ${{ inputs.adopt && '--adopt' || '' }}
 
   destroy-app:
     # Runs only on the default branch, and only when the confirm input is this
@@ -250,7 +191,8 @@ jobs:
       - name: Install dependencies without lifecycle scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      # Like the destroy job: a new advisory cannot block a destroy.
+      # The vulnerability audits of the deploy job protect the deploy, not the
+      # cleanup, so a new advisory cannot block a destroy.
       - name: Audit package signatures
         run: pnpm audit signatures
 

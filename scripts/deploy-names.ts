@@ -1,15 +1,14 @@
-// The names of the deploy resources of this app. alchemy.run.ts,
-// cloudflare.config.ts, and the workflow scripts import them from here, so
-// each name has one owner.
+// The names of the resources that the setup stack owns. alchemy.run.ts and
+// scripts/destroy-app.ts import them from here, so each name has one owner.
 /// <reference types="node" />
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import process from "node:process";
 import { parseEnv } from "node:util";
 
 /**
 GITHUB_REPOSITORY (`<owner>/<repository>`) from the environment, or from .env
-for a deploy or a build on a laptop. GitHub Actions sets it.
+on a laptop. GitHub Actions sets it. The Alchemy CLI reads .env into its own
+config, not into process.env, and alchemy.run.ts needs the names on import.
 */
 function repositoryFromEnvironment(): string {
   const value = process.env["GITHUB_REPOSITORY"];
@@ -24,6 +23,7 @@ function repositoryFromEnvironment(): string {
 /**
 The names that come from the GitHub repository.
 
+- `repository`: the owner and the name, for the Workers Builds link.
 - `stack`: the Alchemy stack. Alchemy keys state by stack name and stage, and
   all stacks of a Cloudflare account share one state store, so the name is the
   owner and the repository, lowercase, joined with `_`. GitHub names ignore
@@ -57,41 +57,9 @@ export function deployNames(repository = repositoryFromEnvironment()) {
     throw new Error(`The repository name "${name}" has no letter or digit.`);
   }
   return {
+    repository: { owner, name },
     stack: `${owner}_${name}`.toLowerCase(),
     worker,
     convexProject: resourceName(40),
   };
-}
-
-/**
-The name of the Worker Preview of a preview stage, which `cf previews deploy`
-uploads and scripts/delete-worker-preview.ts deletes. Cloudflare serves the
-Preview at `<name>-<worker>.<subdomain>.workers.dev`, so `<name>-<worker>`
-must fit in one 63-character DNS label, and the name must start with a
-lowercase letter. The name is a readable part, a dash, and the first 6 hex
-characters of the SHA-256 of the whole stage. The readable part is the stage,
-with `p` first when the stage does not start with a letter, cut to fit without
-a trailing dash. Branch names are often long, so the cut is the normal case
-for a long Worker name. Two stages get one name only in rare cases, more often
-with a long Worker name: 6 hex characters keep the URL short, and a
-54-character Worker name leaves room for only 8 characters. Samebase computes
-the same name to find the Preview.
-*/
-export function workerPreviewName(stage: string, worker: string): string {
-  const budget = 63 - worker.length - 1;
-  if (budget < 8) {
-    throw new Error(
-      `The Worker name "${worker}" leaves ${budget} characters for a Worker Preview name in a 63-character DNS label, and a Preview name needs 8. Use a shorter repository name.`,
-    );
-  }
-  const readable = (/^[a-z]/.test(stage) ? stage : `p${stage}`)
-    .slice(0, budget - 7)
-    .replace(/-+$/, "");
-  const name = `${readable}-${createHash("sha256").update(stage).digest("hex").slice(0, 6)}`;
-  if (!/^[a-z][a-z0-9-]*$/.test(name)) {
-    throw new Error(
-      `Stage "${stage}" gives the Worker Preview name "${name}", which has characters other than a-z, 0-9, and dashes. Deploy a preview with the stage that scripts/alchemy-stage.ts computes.`,
-    );
-  }
-  return name;
 }
