@@ -1,0 +1,149 @@
+# Deploys the app with Alchemy (alchemy.run.ts). GitHub Actions runs the
+# build: there is no Workers Builds trigger.
+#
+# - Push to main: `alchemy deploy --stage prod`.
+# - Pull request opened, synchronize, reopened: `alchemy deploy --stage
+#   pr-<number>`, with PREVIEW_BRANCH set to the branch. A Convex preview
+#   deployment named after the branch plus a Worker Preview of the prod Worker
+#   named after the stage. The stack posts the preview URL as a pull request
+#   comment.
+# - Pull request closed: `alchemy destroy --stage pr-<number>`.
+#
+# Each job installs without lifecycle scripts and runs the supply-chain audits
+# of ci.yml first. Only the deploy or destroy step gets the credentials.
+#
+# State is Alchemy's Cloudflare state store. With --yes, the first deploy in a
+# Cloudflare account creates the store, and a deploy upgrades an old store.
+# Secrets: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, and CONVEX_ACCESS_TOKEN
+# (a Convex team access token). Variable: CONVEX_TEAM_ID (the numeric id of
+# that Convex team).
+name: alchemy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# One run at a time per pull request, and per ref for a push. A merge closes
+# the pull request with another github.ref than its earlier runs, so pull
+# request runs share a group by number, the same as their stage. Pending runs
+# wait instead of replacing each other, so the destroy waits for a running or
+# queued deploy of the same pull request.
+concurrency:
+  group: alchemy-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.number) || github.ref }}
+  queue: max
+  cancel-in-progress: false
+
+# No secrets here: the deploy and destroy steps set them.
+env:
+  CI: "true"
+  # The Alchemy stage: pr-<number> for a pull request, prod for a push.
+  STAGE: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.number) || 'prod' }}
+  # The pull request branch; empty on a push. alchemy.run.ts names the Convex
+  # preview deployment after it.
+  PREVIEW_BRANCH: ${{ github.head_ref }}
+  CONVEX_TEAM_ID: ${{ vars.CONVEX_TEAM_ID }}
+  # Read by GitHub.GitHubEnv in alchemy.run.ts. Empty on push.
+  PULL_REQUEST: ${{ github.event.number }}
+
+jobs:
+  deploy:
+    # Forks get no secrets, so they cannot deploy.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.action != 'closed' && github.event.pull_request.head.repo.fork == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 11.1.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.x
+          cache: pnpm
+
+      # No install scripts and no credentials, so no dependency code runs with secrets before the audits pass.
+      - name: Install dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Audit package signatures
+        run: pnpm audit signatures
+
+      - name: Audit production dependencies
+        run: pnpm audit --prod
+
+      - name: Reject critical development-tool vulnerabilities
+        run: pnpm audit --dev --audit-level=critical
+
+      - name: Check
+        run: pnpm run check
+
+      - name: Deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CONVEX_ACCESS_TOKEN: ${{ secrets.CONVEX_ACCESS_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm exec alchemy deploy --stage "$STAGE" --yes --no-input
+
+  destroy:
+    if: github.event.action == 'closed' && github.event.pull_request.head.repo.fork == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 11.1.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.x
+          cache: pnpm
+
+      # No install scripts and no credentials, so no dependency code runs with secrets before the audits pass.
+      - name: Install dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Audit package signatures
+        run: pnpm audit signatures
+
+      - name: Audit production dependencies
+        run: pnpm audit --prod
+
+      - name: Reject critical development-tool vulnerabilities
+        run: pnpm audit --dev --audit-level=critical
+
+      - name: Destroy the pull request stage
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CONVEX_ACCESS_TOKEN: ${{ secrets.CONVEX_ACCESS_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Only a pull request stage can be destroyed, never prod.
+        run: |
+          if [[ ! "$STAGE" =~ ^pr-[0-9]+$ ]]; then
+            echo "Refusing to destroy '$STAGE'"
+            exit 1
+          fi
+          pnpm exec alchemy destroy --stage "$STAGE" --yes --no-input
