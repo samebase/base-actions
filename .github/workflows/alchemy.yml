@@ -8,8 +8,10 @@
 #
 # A deploy uploads the artifact samebase-setup-output: the ids of the Worker
 # and the Convex project for Samebase, never a secret (scripts/setup-output.ts).
-# The Destroy app workflow (destroy.yml) destroys the app and uploads its
-# destroy receipt under the same name.
+# A deploy job with a failed step uploads the failed output under the same
+# name, so Samebase shows the failed run. The Destroy app workflow
+# (destroy.yml) destroys the app and uploads its destroy receipt under the
+# same name.
 #
 # Each job installs without lifecycle scripts and audits the packages before
 # any credential is in use. The jobs skip a repository without the
@@ -176,8 +178,17 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: node ./scripts/publish-setup-output.ts
 
-      # A rerun of this run replaces the artifact of the earlier attempt.
+      # After any failed step above, including the deploy and the write of the
+      # setup output, writes the failed output instead. It reads no secret.
+      - name: Write the failed setup output for Samebase
+        if: failure()
+        run: node ./scripts/publish-setup-output.ts --failed
+
+      # Uploads the setup output of a successful job and the failed output of a
+      # failed one. A rerun of this run replaces the artifact of the earlier
+      # attempt.
       - name: Upload the setup output
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: samebase-setup-output

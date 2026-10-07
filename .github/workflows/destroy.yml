@@ -10,7 +10,9 @@
 #
 # A destroy that ran uploads the destroy receipt as the artifact
 # samebase-setup-output (scripts/setup-output.ts), the name of the setup
-# output that the deploy in alchemy.yml uploads.
+# output that the deploy in alchemy.yml uploads. A failed destroy uploads
+# nothing, not even the failed output: it stays in GitHub, and Samebase keeps
+# showing the last setup output.
 name: Destroy app
 
 on:

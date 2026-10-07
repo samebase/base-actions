@@ -96,9 +96,12 @@ pushes the starter to `main` before the link exists, so that push builds nothing
 their own builds.
 
 After each deploy, the workflow uploads the artifact `samebase-setup-output`: the ids of the Workers
-and the Convex projects that the stack owns. Samebase reads the newest one from the runs on the
-default branch, checks each id with Cloudflare and Convex, and attaches the Workers and projects to
-the app. It applies the first one by itself only when it names the Worker and the Convex project
+and the Convex projects that the stack owns. A deploy job with a failed step uploads
+`{ "version": 1, "state": "failed" }` under the same name instead, and Samebase shows the failed
+run. Samebase reads the newest artifact with this name from the runs of any workflow on the default
+branch of this repository, never from a fork, and accepts a deploy or destroy output only from a
+successful run and the failed output only from a failed one. It checks each id with Cloudflare and
+Convex, and attaches the Workers and projects to the app. It applies the first one by itself only when it names the Worker and the Convex project
 that Samebase reserved when it created the app, both created after the app. Another first output,
 and a later output that adds, drops, or replaces a Worker or a Convex project, waits for **Apply
 setup output** on the app's overview in Samebase. Samebase never changes or deletes what the stack
@@ -108,8 +111,8 @@ destroy, which Samebase shows as that run's report. `scripts/setup-output.ts` de
 - One section per provider, each with its destination (the Cloudflare account, the Convex team) and
   one list per kind of resource. A stack with several Workers or Convex projects lists them all.
 - A new kind of resource, such as buckets or email routing, is a new list or section and a new
-  `version`. The current version rejects anything it does not define, so the deploy fails before
-  the upload rather than publish something Samebase cannot read.
+  `version`. The current version rejects anything it does not define, so the deploy job fails and
+  uploads the failed output rather than publish something Samebase cannot read.
 - It never holds a secret: anyone who can read the repository can download it.
 
 The deploy never takes over a Worker or a Convex project with the same name that is not in the

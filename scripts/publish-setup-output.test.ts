@@ -136,10 +136,11 @@ describe("readSetupOutput", () => {
     ).toThrow();
   });
 
-  it("fails on another version or on the destroy receipt", () => {
+  it("fails on another version, on the destroy receipt, and on the failed output", () => {
     expect(() => readSetupOutput(printed({ samebase: { ...samebase, version: 2 } }))).toThrow();
     expect(() =>
       readSetupOutput(printed({ samebase: { version: 1, state: "destroyed" } })),
     ).toThrow();
+    expect(() => readSetupOutput(printed({ samebase: { version: 1, state: "failed" } }))).toThrow();
   });
 });

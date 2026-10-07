@@ -1,9 +1,12 @@
 // The setup output: what this stack tells Samebase about the resources it
 // owns, version 1. alchemy.run.ts returns it under the `samebase` key of the
-// stack output; scripts/publish-setup-output.ts writes it after a deploy and
-// scripts/destroy-app.ts after a destroy; .github/workflows/alchemy.yml and
-// .github/workflows/destroy.yml upload the file as the artifact
-// samebase-setup-output.
+// stack output; scripts/publish-setup-output.ts writes it after a deploy, or
+// the failed output after a failed deploy, and scripts/destroy-app.ts after a
+// destroy; .github/workflows/alchemy.yml and .github/workflows/destroy.yml
+// upload the file as the artifact samebase-setup-output. Samebase reads the
+// newest one from the runs on the default branch, whatever their workflow,
+// and accepts `deployed` and `destroyed` only from a successful run and
+// `failed` only from a failed one.
 //
 // One section per provider. Each section names its destination (the
 // Cloudflare account, the Convex team) and holds one list per kind of
@@ -57,6 +60,12 @@ export type DeployedSetupOutput = typeof DeployedSetupOutput.Type;
 /** Written only after `alchemy destroy` ran. It reports the run; Samebase still reads the providers. */
 export const DESTROYED_SETUP_OUTPUT = { version: 1, state: "destroyed" } as const;
 
+/**
+Written when a step of the deploy job failed, so Samebase shows the failed run instead of waiting
+for an output. A failed destroy writes nothing: it stays in GitHub.
+*/
+export const FAILED_SETUP_OUTPUT = { version: 1, state: "failed" } as const;
+
 export const SETUP_OUTPUT_FILE = "samebase-setup-output.json";
 
 /** The `samebase` value of a deploy, with every field checked and no other field allowed. */
@@ -65,7 +74,7 @@ export const decodeDeployedSetupOutput = Schema.decodeUnknownSync(DeployedSetupO
 });
 
 export function writeSetupOutput(
-  output: DeployedSetupOutput | typeof DESTROYED_SETUP_OUTPUT,
+  output: DeployedSetupOutput | typeof DESTROYED_SETUP_OUTPUT | typeof FAILED_SETUP_OUTPUT,
 ): void {
   writeFileSync(SETUP_OUTPUT_FILE, `${JSON.stringify(output, null, 2)}\n`);
 }
