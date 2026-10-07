@@ -1,5 +1,5 @@
-// Destroys the whole app: the destroy-app job of .github/workflows/alchemy.yml
-// runs it after the typed confirmation, with the credentials of the deploy.
+// Destroys the whole app: .github/workflows/destroy.yml runs it after the
+// typed confirmation, with the credentials of the deploy.
 //
 // 1. A dry run of the deploy below opens the state store with --yes, which
 //    upgrades an out-of-date store; the `alchemy state` commands cannot. A
@@ -11,7 +11,10 @@
 // 3. `alchemy destroy --stage prod` deletes the Workers Builds link, the
 //    deploy keys, the Worker with its Previews, and the Convex project with
 //    all its deployments.
-// 4. It deletes what the destroy left of the stack's state, so a later
+// 4. It writes the destroy receipt for Samebase (scripts/setup-output.ts),
+//    which the job uploads as the artifact samebase-setup-output. A stack
+//    without state gets no receipt: nothing was destroyed.
+// 5. It deletes what the destroy left of the stack's state, so a later
 //    repository with the same name starts clean.
 //
 // `--backend cloudflare` opens the account's default state store, the one
@@ -22,6 +25,7 @@ import { execFileSync } from "node:child_process";
 import process from "node:process";
 
 import { deployNames } from "./deploy-names.ts";
+import { DESTROYED_SETUP_OUTPUT, writeSetupOutput } from "./setup-output.ts";
 
 const alchemy = (args: string[]) =>
   execFileSync("pnpm", ["exec", "alchemy", ...args], {
@@ -57,6 +61,7 @@ if (!hasStack()) {
 } else {
   alchemy(deployWorkerAndProject);
   alchemy(["destroy", "--stage", "prod", "--yes", "--no-input"]);
+  writeSetupOutput(DESTROYED_SETUP_OUTPUT);
   if (hasStack()) {
     alchemy(["state", "delete", "--recursive", stack, "--backend", "cloudflare"]);
   }

@@ -29,6 +29,7 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
 import { deployNames } from "./scripts/deploy-names.ts";
+import type { DeployedSetupOutput } from "./scripts/setup-output.ts";
 
 const names = deployNames();
 
@@ -191,6 +192,31 @@ export default Alchemy.Stack(
       branch: builds.repository.branch,
     });
 
-    return { workerUrl: shell.url, convexUrl: project.prodDeploymentUrl };
+    // What Samebase reads to show this app: scripts/setup-output.ts defines it,
+    // scripts/publish-setup-output.ts publishes it after each deploy.
+    const samebase = Output.map(
+      Output.all(
+        shell.accountId,
+        shell.workerId,
+        shell.name,
+        builds.production,
+        project.teamId,
+        project.projectId,
+      ),
+      ([accountId, tag, name, production, teamId, projectId]): DeployedSetupOutput => ({
+        version: 1,
+        state: "deployed",
+        cloudflare: {
+          accountId,
+          workers: [{ tag, name, rootDirectory: production.rootDirectory }],
+        },
+        convex: {
+          teamId: String(teamId),
+          projects: [{ projectId: String(projectId), convexConfigPath: "convex.json" }],
+        },
+      }),
+    );
+
+    return { workerUrl: shell.url, convexUrl: project.prodDeploymentUrl, samebase };
   }),
 );

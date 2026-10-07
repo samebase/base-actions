@@ -90,11 +90,27 @@ Samebase research note "Alchemy setup stacks next to Workers Builds"
 | Pull request that changes the stack   | `alchemy plan` and `alchemy drift`, read-only                                               |
 | Push to `main` that changes the stack | `alchemy deploy --detect-drift`, which also repairs drift                                   |
 | Run workflow on the default branch    | The same deploy. With `adopt`, it takes over resources that exist but are not in the state. |
-| Run workflow, confirmed               | The destroy of the app: see [Destroy the app](#destroy-the-app)                             |
 
 The deploy that creates the Workers Builds link also starts the first production build: Samebase
 pushes the starter to `main` before the link exists, so that push builds nothing. Later pushes start
 their own builds.
+
+After each deploy, the workflow uploads the artifact `samebase-setup-output`: the ids of the Workers
+and the Convex projects that the stack owns. Samebase reads the newest one from the runs on the
+default branch, checks each id with Cloudflare and Convex, and attaches the Workers and projects to
+the app. It applies the first one by itself only when it names the Worker and the Convex project
+that Samebase reserved when it created the app, both created after the app. Another first output,
+and a later output that adds, drops, or replaces a Worker or a Convex project, waits for **Apply
+setup output** on the app's overview in Samebase. Samebase never changes or deletes what the stack
+owns. The [Destroy app](#destroy-the-app) workflow uploads a receipt under the same name after a
+destroy, which Samebase shows as that run's report. `scripts/setup-output.ts` defines the file:
+
+- One section per provider, each with its destination (the Cloudflare account, the Convex team) and
+  one list per kind of resource. A stack with several Workers or Convex projects lists them all.
+- A new kind of resource, such as buckets or email routing, is a new list or section and a new
+  `version`. The current version rejects anything it does not define, so the deploy fails before
+  the upload rather than publish something Samebase cannot read.
+- It never holds a secret: anyone who can read the repository can download it.
 
 The deploy never takes over a Worker or a Convex project with the same name that is not in the
 stack's state; it stops with `OwnedBySomeoneElse`. Run the workflow with `adopt` to take them over.
@@ -130,11 +146,14 @@ registers this token as one, and Workers Builds deploys with it.
 
 ### Destroy the app
 
-Open **Actions** in the GitHub repository, select the `alchemy` workflow, and choose **Run
-workflow** on the default branch with `<owner>/<repository>` in the `confirm` field. The run deletes
-the Workers Builds link, the Convex deploy keys, the Worker with its Previews, the Convex project
-with every deployment and its data, and the stack's state. Any other value, or another branch, runs
-nothing. The repository stays.
+Open **Actions** in the GitHub repository, select the **Destroy app** workflow
+(`.github/workflows/destroy.yml`), choose **Run workflow** on the default branch, and type
+`delete <owner>/<repository>` in the `confirm` field. The run deletes the Workers Builds link, the
+Convex deploy keys, the Worker with its Previews, the Convex project with every deployment and its
+data, and the stack's state. Any other text, another branch, or a repository without the
+`CONVEX_TEAM_ID` variable fails the run before it deletes anything, and the error says what to
+change. The repository stays. Deleting the GitHub repository also deletes this workflow, so run it
+first.
 
 ### Deploy from a laptop
 
@@ -157,6 +176,8 @@ pnpm exec alchemy deploy --stage prod
 - `convex/` contains the backend, schema, authentication, and generated Convex bindings.
 - `src/` contains the React application and routes.
 - `alchemy.run.ts` and `.github/workflows/alchemy.yml` define and run the setup stack.
+- `.github/workflows/destroy.yml` destroys the app.
+- `scripts/setup-output.ts` defines what the setup stack tells Samebase.
 
 ## Generated and managed files
 

@@ -31,3 +31,6 @@ convex/.tmp
 
 # Files of the Alchemy CLI
 .alchemy
+
+# The setup output for Samebase, written in GitHub Actions
+samebase-setup-output.json
